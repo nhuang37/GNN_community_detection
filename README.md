@@ -20,4 +20,4 @@ pip install -q git+https://github.com/pyg-team/pytorch_geometric.git
 ## Experiments
 - Simulation on DSGM (1),(2): ```Experiment_simulation.ipynb```
 - Experiment on Amazon Photo network (3): ```Experiment_real_world.ipynb```
-- Experiment results can be downloaded in ```result``` the folder
+- Experiment results can be downloaded in ```result``` file
