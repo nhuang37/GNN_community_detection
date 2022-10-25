@@ -240,30 +240,32 @@ def run_model(model, feats, g, labels,  train_nid, val_nid, test_nid,
     return best_val, best_test
 
 def run_exp(data, g, emb_dim, device='cuda:0', eval_every = 1, k=2, depth=2, hidden_dim=128,
-            act=False, lr=1e-2, n_epochs = 200, tol=1e-2, verbose=False, GNN_flag=True, MC_runs=5):
+            act=False, lr=1e-2, n_epochs = 200, tol=1e-2, verbose=False, GNN_flag=True, MC_runs=5, norm_flag=True):
   '''
   data: pytorch geometric data class
-  g: graph operator (adjacency/RW/Lap)
-  feat_X: node features (or dimensionality-reduced features)
-  K: maximum number of power_iteration
-  all_iter: 'all' - use all iterations; 'last' - use the last iteration; 'first_last" - use the first (i.e. input feat) and the last iter
+  g: graph adjacency. If norm is True, use normalized graph adjacency
+  emb_dim: embedding dimension
   '''
   results = []
   loss_fcn = torch.nn.CrossEntropyLoss()
 
   out_feats = len(torch.unique(data.y))
-  degs = g.sum(axis=0).clip(min=1)
-  norm = np.power(degs, -0.5)
-  g_lap = np.diag(norm) @ g @ np.diag(norm)
-  g_tensor = torch.FloatTensor(g_lap).to_sparse() 
+  if norm_flag:
+    degs = g.sum(axis=0).clip(min=1)
+    norm = np.power(degs, -0.5)
+    g = np.diag(norm) @ g @ np.diag(norm)
+    print(f"normalizing, deg_max={degs.max()}, deg_mean={degs.mean()}")
+
+  g_tensor = torch.FloatTensor(g).to_sparse() 
   g_tensor = g_tensor.to(device)
+  #print(g_tensor)
   if GNN_flag:
   #print(depth)
     feats = data.x
   else:
     Xouter = data.x.numpy() @ data.x.numpy().T
     #print(f'A: {A.shape}, Cov(X): {Xouter.shape}')
-    feats = embed(g_lap, Xouter, d=emb_dim)
+    feats = embed(g, Xouter, d=emb_dim)
 
   feats = feats.to(device)
   labels = data.y.to(device)
@@ -325,7 +327,7 @@ def train_test_split(data):
 def delete_edge(A, sparsify_pct=10, seed=0):
   '''
   Input: binary adjacency matrix (symmetric, hollow)
-  Output: modified adjacency matrix with num_edges removed
+  Output: modified adjacency matrix with sparsify_pct percentage of edges removed
   '''
   np.random.seed(seed)
 
@@ -334,7 +336,7 @@ def delete_edge(A, sparsify_pct=10, seed=0):
   assert ((A==0) | (A==1)).all(), "not binary!"
 
   E = A.sum()
-  num_edges = int(E * sparsify_pct/100)
+  num_edges = int( (E/2) * (sparsify_pct/100))
   x_list, y_list = np.where(np.triu(A) == 1) #only take the upper triangular matrix to avoid dups
   edge_list = [(x,y) for (x,y) in zip(x_list, y_list)]
   A_del = copy.deepcopy(A)
@@ -345,8 +347,45 @@ def delete_edge(A, sparsify_pct=10, seed=0):
   A_del += np.eye(A.shape[0]) #add self-loop
   return A_del
 
+def delete_edge_local(A, knn=5, seed=0):
+  '''
+  Input: binary adjacency matrix (symmetric, hollow) A; knn - the number of local neighbors to sample
+  Output: modified adjacency matrix with all nodes having degree min(dv, knn)
+  '''
+  np.random.seed(seed)
+
+  assert np.diag(A).sum() == 0, "not hollow!"
+  assert np.allclose(A, A.T), "not symmetric!"
+  assert ((A==0) | (A==1)).all(), "not binary!"
+
+
+  ###pretend A is a directed graph and sample per node
+  n = A.shape[0]
+  A_del = np.zeros((n,n))
+  D = A.sum(axis=0)
+  for i in range(n):
+    if D[i] <= knn:
+      pass #keep all the original edges
+    else:
+      neighbor_list = np.where(A[i,:] == 1)[0].tolist()
+      neighbor_sample = random.sample(neighbor_list, knn)
+      for j in neighbor_sample:
+        A_del[i,j] = 1 #directed graph add edge per node's adjacency list
+  ###turn the directed (non-symmetric) graph into a undirected (symmetric) one
+  for i in range(n):
+    for j in range(n):
+      if A_del[i,j] != A_del[j,i]:
+        A_del[i,j] = A_del[j,i] = 1
+  A_del += np.eye(n)
+  edge_drop_ratio = 100*(1 - A_del.sum() / A.sum())
+  print(f'new graph drops {edge_drop_ratio:.2f} percentage of edges')
+  ###checks
+  assert np.allclose(A_del, A_del.T), "new graph not symmetric!"
+  assert ((A_del==0) | (A_del==1)).all(), "new graph not binary!"
+  return A_del
+
 def run_data(data, undirected=True, eval_every=1, device='cuda:0', k=2, 
-	         sparsify=0, depth=2, sp_seed=0, spectral_only=False, sp_dim=200):
+	         sparsify=0, depth=2, spectral_only=False, gnn_only=False, sp_dim=200, norm_flag=True, delete_type='global', num_local_edges=5):
   '''
   data: pytorch geometric data
   undirected: If true, add reverse edge to symmetrize the original graph
@@ -357,22 +396,28 @@ def run_data(data, undirected=True, eval_every=1, device='cuda:0', k=2,
   
   #tuple(emb_dim, GNN_flag, nonlinearity_flag)
   if spectral_only:
-    name_dict = {f'SP({sp_dim})': (sp_dim, False, False)}
+    name_dict = {f'SE({sp_dim})': (sp_dim, False, False)}
+  elif gnn_only:
+    name_dict = {'GNN(lin)':(None, True, False), 'GNN(non)':(None, True, True)}
   else:
-    name_dict = {'SP(100)':(100, False,False),'SP(150)':(150, False,False),
+    name_dict = {'SE(150)':(150, False,False),'SE(200)':(200, False,False),
                'GNN(lin)':(None, True, False), 'GNN(non)':(None, True, True)}
 
 
-  if sparsify > 0: #sparsify the input graph by dropping edges randomly
+  if sparsify > 0 or delete_type=='local': #sparsify the input graph by dropping edges randomly
     results = defaultdict(list)
       #repeat for 10 runs
     for sp_seed in range(10):
       print(f"running trial {sp_seed}")
-      A_sp = delete_edge(A, sparsify_pct=sparsify, seed=sp_seed)
+      if delete_type == 'global':
+        A_sp = delete_edge(A, sparsify_pct=sparsify, seed=sp_seed)
+      else:
+        A_sp = delete_edge_local(A, knn=num_local_edges, seed=sp_seed)
+
       for name, flag in name_dict.items():
         print(f"running model {name}")
         emb_dim, GNN_flag, act_flag = flag
-        accs = run_exp(data, A_sp, emb_dim, act=act_flag, GNN_flag=GNN_flag, depth=depth, k=k)
+        accs = run_exp(data, A_sp, emb_dim, act=act_flag, GNN_flag=GNN_flag, depth=depth, k=k, norm_flag=norm_flag)
         results[name].append(accs)
         mean_acc = sum(accs) / len(accs)
         print(f"finish run={sp_seed} for model={name}, mean_acc={mean_acc}")
@@ -382,7 +427,7 @@ def run_data(data, undirected=True, eval_every=1, device='cuda:0', k=2,
     for name, flag in name_dict.items():
       print(f"running model {name}")
       emb_dim, GNN_flag, act_flag = flag
-      accs = run_exp(data, A, emb_dim, act=act_flag, GNN_flag=GNN_flag, depth=depth, k=k)
+      accs = run_exp(data, A, emb_dim, act=act_flag, GNN_flag=GNN_flag, depth=depth, k=k, norm_flag=norm_flag)
       results[name] = accs
       mean_acc = sum(accs) / len(accs)
       print(f"finish for model={name}, mean_acc={mean_acc}")
@@ -396,7 +441,7 @@ def main(args):
 
     if args.datasets == 'wiki':
       datafunction = WikipediaNetwork
-      names = ['chameleon', 'squirrel']
+      names = ['chameleon'] #['chameleon', 'squirrel']
     elif args.datasets == 'planetoid':
     	datafunction = Planetoid
     	names = ['Cora', 'CiteSeer']
@@ -430,13 +475,12 @@ def main(args):
       
 
       results_all[name] = run_data(data, eval_every=args.eval_every, device=device, k=args.poly_degree, 
-      	                           sparsify=args.sparsify_pct, depth=args.depth,
-      	                           spectral_only=args.spectral_only, sp_dim = args.spectral_dim)
-    if args.spectral_only:
-      file_name = os.path.join(args.result_path, args.datasets + str(args.sparsify_pct) +'_sp' + str(args.spectral_dim) + "_.pkl")
-    else:
-      file_name = os.path.join(args.result_path, args.datasets + str(args.sparsify_pct) +'_' + str(args.poly_degree) + "_.pkl")
+      	                           sparsify=args.sparsify_pct, depth=args.depth, spectral_only=args.spectral_only, gnn_only=args.gnn_only, 
+                                   sp_dim = args.spectral_dim, norm_flag=args.norm, delete_type=args.del_type, num_local_edges=args.num_edges)
 
+
+    specs = f'data={args.datasets}_pct={args.sparsify_pct}_degree={args.poly_degree}_SPonly={args.spectral_only}_GNNonly={args.gnn_only}_norm={args.norm}_type={args.del_type}_edges={args.num_edges}'
+    file_name = os.path.join(args.result_path, specs)
     pickle.dump(results_all, open(file_name, "wb" ))
 
 
@@ -449,16 +493,19 @@ if __name__ == "__main__":
     parser.add_argument("--data_path", type=str, default="./dataset/", help="dataset folder path")
     parser.add_argument("--result_path", type=str, default="./result/", help="dataset folder path")
     parser.add_argument("--eval_every", type=int, default=1,help="evaluation every k epochs")
-    parser.add_argument("--sparsify_pct",  type=int, default=0, help="sparsify the graph by keeping pct edges ")
     parser.add_argument("--depth",  type=int, default=2, help="GNN depth")
-    parser.add_argument("--poly_degree",  type=int, default=4, help="polynomial filter degree")
-    parser.add_argument("--spectral_only",  action='store_true', help="only run spectral")
     parser.add_argument("--spectral_dim",  type=int, default=200, help="spectral_dim")
 
+    parser.add_argument("--sparsify_pct",  type=int, default=0, help="sparsify the graph by keeping pct edges ")
+    parser.add_argument("--poly_degree",  type=int, default=2, help="polynomial filter degree")
+    parser.add_argument("--spectral_only",  action='store_true', help="default false; if true, only run spectral")
+    parser.add_argument("--gnn_only",  action='store_true', help="default false; if true, only run gnns")
+    parser.add_argument("--norm", action='store_true', help="default true: use normalized adjacency; if false, use un-normalized adj")
+    parser.add_argument("--del_type", type=str, default="global", help="drop edge type: global - uniform sampling; local - local neighbor sampling")    
+    parser.add_argument("--num_edges",  type=int, default=5, help="when choosing del_type == local, the number of local neighbors to keep")
 
     args = parser.parse_args()
 
     print(args)
     main(args)
-
 
