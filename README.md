@@ -1,4 +1,4 @@
-# GNNs for community detection on sparse graphs
+# A SPECTRAL ANALYSIS OF GRAPH NEURAL NETWORKS ON DENSE AND SPARSE GRAPHS
 
 This repo contains implementations of (1) sampling from a Dense-Sparse-Graph-Model (DSGM); (2) running graph neural networks (GNNs) and spectral embeddings (SEs) on random graphs from DSGM; (3) compare GNNs and SEs on real-world graphs.
 
