@@ -16,7 +16,7 @@ from torch_geometric.datasets import WebKB, WikipediaNetwork, Planetoid, Amazon,
 from torch_geometric.utils import to_networkx, homophily
 import time
 from scipy.sparse.linalg import eigsh, eigs
-from scipy.sparse.linalg.eigen.arpack import ArpackError
+from scipy.sparse.linalg._eigen.arpack import ArpackError
 import pandas as pd
 import seaborn as sns
 import copy
