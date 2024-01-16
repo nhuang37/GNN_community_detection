@@ -19,5 +19,8 @@ pip install -q git+https://github.com/pyg-team/pytorch_geometric.git
 ```
 ## Experiments
 - Simulation on DSGM (1),(2): ```Experiment_simulation.ipynb```
-- Experiment on Amazon Photo network (3): ```Experiment_real_world.ipynb``` that imports the modules in ```sparsity.py```
+- Experiment on real-world datasets (3):
+  - core modules: ```sparsity.py```
+  - Table 1: ```Experiment_real_world.ipynb```
+  - Table 2&3: ```Experiment_real_world_ablation.ipynb```
 - Experiment results can be downloaded in ```result``` file
